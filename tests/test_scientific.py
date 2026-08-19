@@ -91,6 +91,39 @@ class TestTrigonometry(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sci.tan_deg(angle)
 
+    def test_asin_deg(self):
+        self.assertAlmostEqual(sci.asin_deg(0), 0.0)
+        self.assertAlmostEqual(sci.asin_deg(0.5), 30.0)
+        self.assertAlmostEqual(sci.asin_deg(-1), -90.0)
+
+    def test_acos_deg(self):
+        self.assertAlmostEqual(sci.acos_deg(1), 0.0)
+        self.assertAlmostEqual(sci.acos_deg(0.5), 60.0)
+        self.assertAlmostEqual(sci.acos_deg(-1), 180.0)
+
+    def test_inverse_trig_rejects_out_of_domain(self):
+        for value in (-1.5, 1.5):
+            with self.assertRaises(ValueError):
+                sci.asin_deg(value)
+            with self.assertRaises(ValueError):
+                sci.acos_deg(value)
+
+    def test_atan_deg(self):
+        self.assertAlmostEqual(sci.atan_deg(0), 0.0)
+        self.assertAlmostEqual(sci.atan_deg(1), 45.0)
+        self.assertAlmostEqual(sci.atan_deg(-1), -45.0)
+
+    def test_atan2_deg_keeps_quadrant(self):
+        self.assertAlmostEqual(sci.atan2_deg(1, 1), 45.0)
+        self.assertAlmostEqual(sci.atan2_deg(1, -1), 135.0)
+        self.assertAlmostEqual(sci.atan2_deg(-1, -1), -135.0)
+        self.assertAlmostEqual(sci.atan2_deg(0, -1), 180.0)
+
+    def test_inverse_trig_round_trips(self):
+        for angle in (-60, -15, 0, 15, 60):
+            self.assertAlmostEqual(sci.asin_deg(sci.sin_deg(angle)), angle)
+            self.assertAlmostEqual(sci.atan_deg(sci.tan_deg(angle)), angle)
+
 
 class TestStatistics(unittest.TestCase):
     # Population variance 4.0, sample variance 32/7.
@@ -128,6 +161,50 @@ class TestStatistics(unittest.TestCase):
         with self.assertRaises(ValueError):
             sci.variance([1.0], sample=True)
         self.assertAlmostEqual(sci.variance([1.0], sample=False), 0.0)
+
+    def test_mode(self):
+        self.assertAlmostEqual(sci.mode(self.DATA), 4.0)
+        self.assertAlmostEqual(sci.mode([7]), 7.0)
+
+    def test_mode_rejects_multimodal_and_empty_input(self):
+        with self.assertRaises(ValueError):
+            sci.mode([1, 1, 2, 2])
+        with self.assertRaises(ValueError):
+            sci.mode([])
+
+    def test_percentile(self):
+        values = [1, 2, 3, 4]
+        self.assertAlmostEqual(sci.percentile(values, 0), 1.0)
+        self.assertAlmostEqual(sci.percentile(values, 100), 4.0)
+        self.assertAlmostEqual(sci.percentile(values, 50), 2.5)
+        self.assertAlmostEqual(sci.percentile(values, 25), 1.75)
+
+    def test_percentile_50_matches_median(self):
+        for values in ([3, 1, 2], [4, 1, 3, 2], [5]):
+            self.assertAlmostEqual(
+                sci.percentile(values, 50), sci.median(values)
+            )
+
+    def test_percentile_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            sci.percentile([], 50)
+        for p in (-1, 101):
+            with self.assertRaises(ValueError):
+                sci.percentile([1, 2, 3], p)
+
+    def test_correlation(self):
+        xs = [1, 2, 3, 4, 5]
+        self.assertAlmostEqual(sci.correlation(xs, [2, 4, 6, 8, 10]), 1.0)
+        self.assertAlmostEqual(sci.correlation(xs, [10, 8, 6, 4, 2]), -1.0)
+        self.assertAlmostEqual(sci.correlation(xs, xs), 1.0)
+
+    def test_correlation_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            sci.correlation([1, 2, 3], [1, 2])
+        with self.assertRaises(ValueError):
+            sci.correlation([1], [2])
+        with self.assertRaises(ValueError):
+            sci.correlation([1, 1, 1], [1, 2, 3])
 
 
 class TestNumericalMethods(unittest.TestCase):
@@ -200,6 +277,48 @@ class TestNumericalMethods(unittest.TestCase):
         with self.assertRaises(ValueError):
             sci.solve_quadratic(0, 2, 1)
 
+    def test_newton_root(self):
+        self.assertAlmostEqual(
+            sci.newton_root(lambda x: x * x - 2, 1), math.sqrt(2), places=9
+        )
+        self.assertAlmostEqual(
+            sci.newton_root(lambda x: math.cos(x) - x, 0.5), 0.739085133, places=8
+        )
+
+    def test_newton_root_uses_supplied_derivative(self):
+        self.assertAlmostEqual(
+            sci.newton_root(lambda x: x * x - 9, 1, fprime=lambda x: 2 * x),
+            3.0,
+            places=12,
+        )
+
+    def test_newton_root_agrees_with_bisection(self):
+        f = lambda x: x ** 3 - x - 2  # noqa: E731
+        self.assertAlmostEqual(
+            sci.newton_root(f, 2), sci.find_root(f, 1, 2), places=8
+        )
+
+    def test_newton_root_returns_starting_point_at_a_root(self):
+        self.assertEqual(sci.newton_root(lambda x: x * x, 0), 0)
+
+    def test_newton_root_rejects_vanishing_derivative(self):
+        with self.assertRaises(ValueError):
+            sci.newton_root(lambda x: x * x + 1, 0)
+
+    def test_newton_root_reports_non_convergence(self):
+        # Newton's method cycles between 0 and 1 for this cubic.
+        with self.assertRaises(ValueError):
+            sci.newton_root(
+                lambda x: x ** 3 - 2 * x + 2,
+                0,
+                fprime=lambda x: 3 * x * x - 2,
+                max_iterations=10,
+            )
+
+    def test_newton_root_rejects_non_positive_tolerance(self):
+        with self.assertRaises(ValueError):
+            sci.newton_root(lambda x: x - 1, 0, tolerance=0)
+
 
 class TestConversions(unittest.TestCase):
     def test_celsius_to_fahrenheit(self):
@@ -225,6 +344,21 @@ class TestConversions(unittest.TestCase):
     def test_celsius_to_kelvin_rejects_below_absolute_zero(self):
         with self.assertRaises(ValueError):
             sci.celsius_to_kelvin(-300)
+
+    def test_kelvin_to_celsius(self):
+        self.assertAlmostEqual(sci.kelvin_to_celsius(273.15), 0.0)
+        self.assertAlmostEqual(sci.kelvin_to_celsius(0), -273.15)
+        self.assertAlmostEqual(sci.kelvin_to_celsius(300), 26.85)
+
+    def test_kelvin_round_trip(self):
+        for celsius in (-100, 0, 37, 1000):
+            self.assertAlmostEqual(
+                sci.kelvin_to_celsius(sci.celsius_to_kelvin(celsius)), celsius
+            )
+
+    def test_kelvin_to_celsius_rejects_negative_kelvin(self):
+        with self.assertRaises(ValueError):
+            sci.kelvin_to_celsius(-1)
 
 
 class TestConstants(unittest.TestCase):

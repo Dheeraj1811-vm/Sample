@@ -12,6 +12,7 @@ Run directly for a short demonstration:
 from __future__ import annotations
 
 import math
+from collections import Counter
 from typing import Callable, Sequence
 
 __all__ = [
@@ -32,17 +33,26 @@ __all__ = [
     "sin_deg",
     "cos_deg",
     "tan_deg",
+    "asin_deg",
+    "acos_deg",
+    "atan_deg",
+    "atan2_deg",
     "mean",
     "median",
     "variance",
     "std_dev",
+    "mode",
+    "percentile",
+    "correlation",
     "derivative",
     "integrate",
     "find_root",
+    "newton_root",
     "solve_quadratic",
     "celsius_to_fahrenheit",
     "fahrenheit_to_celsius",
     "celsius_to_kelvin",
+    "kelvin_to_celsius",
 ]
 
 # --------------------------------------------------------------------------
@@ -138,6 +148,34 @@ def tan_deg(angle: float) -> float:
     return math.tan(math.radians(angle))
 
 
+def asin_deg(value: float) -> float:
+    """Return the arcsine of ``value`` in degrees, within [-90, 90]."""
+    if not -1.0 <= value <= 1.0:
+        raise ValueError("arcsine is undefined outside [-1, 1]")
+    return math.degrees(math.asin(value))
+
+
+def acos_deg(value: float) -> float:
+    """Return the arccosine of ``value`` in degrees, within [0, 180]."""
+    if not -1.0 <= value <= 1.0:
+        raise ValueError("arccosine is undefined outside [-1, 1]")
+    return math.degrees(math.acos(value))
+
+
+def atan_deg(value: float) -> float:
+    """Return the arctangent of ``value`` in degrees, within (-90, 90)."""
+    return math.degrees(math.atan(value))
+
+
+def atan2_deg(y: float, x: float) -> float:
+    """Return the angle of the point ``(x, y)`` in degrees, within (-180, 180].
+
+    Unlike :func:`atan_deg` this keeps the quadrant information, so it is the
+    right choice for converting cartesian coordinates to a bearing.
+    """
+    return math.degrees(math.atan2(y, x))
+
+
 # --------------------------------------------------------------------------
 # Descriptive statistics
 # --------------------------------------------------------------------------
@@ -179,6 +217,54 @@ def variance(values: Sequence[float], sample: bool = True) -> float:
 def std_dev(values: Sequence[float], sample: bool = True) -> float:
     """Return the standard deviation of ``values``."""
     return math.sqrt(variance(values, sample=sample))
+
+
+def mode(values: Sequence[float]) -> float:
+    """Return the single most frequent value in ``values``.
+
+    Raises ``ValueError`` when the data is multimodal, since there is no
+    sensible way to pick between tied candidates.
+    """
+    if not values:
+        raise ValueError("mode requires at least one value")
+    ranked = Counter(values).most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        raise ValueError("data is multimodal; no unique mode")
+    return float(ranked[0][0])
+
+
+def percentile(values: Sequence[float], p: float) -> float:
+    """Return the ``p``-th percentile of ``values`` for ``0 <= p <= 100``.
+
+    Ranks are interpolated linearly between the two neighbouring order
+    statistics, matching the default convention of ``numpy.percentile``.
+    """
+    if not values:
+        raise ValueError("percentile requires at least one value")
+    if not 0 <= p <= 100:
+        raise ValueError("percentile must be between 0 and 100")
+    ordered = sorted(values)
+    rank = (len(ordered) - 1) * p / 100
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return float(ordered[low])
+    return ordered[low] + (ordered[high] - ordered[low]) * (rank - low)
+
+
+def correlation(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """Return the Pearson correlation coefficient of ``xs`` and ``ys``."""
+    if len(xs) != len(ys):
+        raise ValueError("inputs must have the same length")
+    if len(xs) < 2:
+        raise ValueError("correlation requires at least two data points")
+    mx, my = mean(xs), mean(ys)
+    covariance = math.fsum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    spread_x = math.fsum((x - mx) ** 2 for x in xs)
+    spread_y = math.fsum((y - my) ** 2 for y in ys)
+    if spread_x == 0 or spread_y == 0:
+        raise ValueError("correlation is undefined when an input is constant")
+    return covariance / math.sqrt(spread_x * spread_y)
 
 
 # --------------------------------------------------------------------------
@@ -252,6 +338,40 @@ def find_root(
     return (low + high) / 2
 
 
+def newton_root(
+    f: Callable[[float], float],
+    x0: float,
+    fprime: Callable[[float], float] | None = None,
+    tolerance: float = 1e-12,
+    max_iterations: int = 100,
+) -> float:
+    """Find a root of ``f`` near ``x0`` using the Newton-Raphson method.
+
+    When ``fprime`` is omitted the slope is approximated with
+    :func:`derivative`. Convergence is quadratic near a simple root, so this
+    is much faster than :func:`find_root` -- but it needs a good starting
+    guess and is not guaranteed to converge at all.
+    """
+    if tolerance <= 0:
+        raise ValueError("tolerance must be positive")
+
+    x = x0
+    for _ in range(max_iterations):
+        fx = f(x)
+        if abs(fx) < tolerance:
+            return x
+        slope = fprime(x) if fprime is not None else derivative(f, x)
+        if slope == 0:
+            raise ValueError("derivative vanished; Newton's method cannot proceed")
+        step = fx / slope
+        x -= step
+        if abs(step) < tolerance:
+            return x
+    raise ValueError(
+        f"Newton's method did not converge within {max_iterations} iterations"
+    )
+
+
 def solve_quadratic(a: float, b: float, c: float) -> tuple[complex, complex]:
     """Return both roots of ``a*x^2 + b*x + c = 0``.
 
@@ -287,6 +407,13 @@ def celsius_to_kelvin(celsius: float) -> float:
     return kelvin
 
 
+def kelvin_to_celsius(kelvin: float) -> float:
+    """Convert kelvin to degrees Celsius."""
+    if kelvin < 0:
+        raise ValueError("temperature is below absolute zero")
+    return kelvin - 273.15
+
+
 # --------------------------------------------------------------------------
 # Demo
 # --------------------------------------------------------------------------
@@ -304,23 +431,29 @@ def _demo() -> None:
     print("\nTrigonometry")
     print(f"  sin(30 deg)     = {sin_deg(30):.6f}")
     print(f"  cos(60 deg)     = {cos_deg(60):.6f}")
+    print(f"  asin(0.5)       = {asin_deg(0.5):.6f} deg")
+    print(f"  atan2(1, -1)    = {atan2_deg(1, -1):.6f} deg")
 
     print("\nStatistics")
     print(f"  data            = {samples}")
     print(f"  mean            = {mean(samples):.4f}")
     print(f"  median          = {median(samples):.4f}")
     print(f"  std dev         = {std_dev(samples):.4f}")
+    print(f"  90th percentile = {percentile(samples, 90):.4f}")
+    print(f"  corr with index = {correlation(samples, range(len(samples))):.4f}")
 
     print("\nNumerical methods")
     print(f"  d/dx x^2 at x=3 = {derivative(lambda x: x ** 2, 3):.6f}")
     print(f"  integral sin(x) over [0, pi] = {integrate(math.sin, 0, math.pi):.6f}")
     print(f"  root of x^2 - 2 = {find_root(lambda x: x * x - 2, 0, 2):.10f}")
+    print(f"  same via Newton = {newton_root(lambda x: x * x - 2, 1):.10f}")
     print(f"  roots of x^2 + 2x + 5 = {solve_quadratic(1, 2, 5)}")
 
     print("\nConversions")
     print(f"  100 C           = {celsius_to_fahrenheit(100)} F")
     print(f"  98.6 F          = {fahrenheit_to_celsius(98.6):.2f} C")
     print(f"  25 C            = {celsius_to_kelvin(25)} K")
+    print(f"  300 K           = {kelvin_to_celsius(300):.2f} C")
 
     print("\nConstants")
     print(f"  c               = {SPEED_OF_LIGHT} m/s")
