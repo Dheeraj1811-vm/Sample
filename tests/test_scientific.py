@@ -206,6 +206,77 @@ class TestStatistics(unittest.TestCase):
         with self.assertRaises(ValueError):
             sci.correlation([1, 1, 1], [1, 2, 3])
 
+    def test_linear_regression_recovers_an_exact_line(self):
+        slope, intercept = sci.linear_regression([0, 1, 2, 3], [1, 3, 5, 7])
+        self.assertAlmostEqual(slope, 2.0)
+        self.assertAlmostEqual(intercept, 1.0)
+
+    def test_linear_regression_least_squares_fit(self):
+        slope, intercept = sci.linear_regression([0, 1, 2, 3], [1, 3, 5, 8])
+        self.assertAlmostEqual(slope, 2.3)
+        self.assertAlmostEqual(intercept, 0.8)
+
+    def test_linear_regression_handles_constant_ys(self):
+        # correlation is undefined here, but the fitted line is not.
+        slope, intercept = sci.linear_regression([1, 2, 3], [5, 5, 5])
+        self.assertAlmostEqual(slope, 0.0)
+        self.assertAlmostEqual(intercept, 5.0)
+
+    def test_linear_regression_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            sci.linear_regression([1, 2, 3], [1, 2])
+        with self.assertRaises(ValueError):
+            sci.linear_regression([1], [2])
+        with self.assertRaises(ValueError):
+            sci.linear_regression([2, 2, 2], [1, 2, 3])
+
+
+class TestVectors(unittest.TestCase):
+    def test_dot(self):
+        self.assertAlmostEqual(sci.dot([1, 2, 3], [4, 5, 6]), 32.0)
+        self.assertAlmostEqual(sci.dot([1, 0], [0, 1]), 0.0)
+        self.assertAlmostEqual(sci.dot([-2, 3], [4, 1]), -5.0)
+
+    def test_dot_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            sci.dot([1, 2, 3], [1, 2])
+        with self.assertRaises(ValueError):
+            sci.dot([], [])
+
+    def test_magnitude(self):
+        self.assertAlmostEqual(sci.magnitude([3, 4]), 5.0)
+        self.assertAlmostEqual(sci.magnitude([1, 2, 2]), 3.0)
+        self.assertAlmostEqual(sci.magnitude([0, 0]), 0.0)
+
+    def test_magnitude_matches_hypotenuse_in_two_dimensions(self):
+        self.assertAlmostEqual(sci.magnitude([5, 12]), sci.hypotenuse(5, 12))
+
+    def test_magnitude_rejects_empty_vector(self):
+        with self.assertRaises(ValueError):
+            sci.magnitude([])
+
+    def test_normalize(self):
+        self.assertEqual(sci.normalize([3, 4]), [0.6, 0.8])
+        self.assertAlmostEqual(sci.magnitude(sci.normalize([1, 2, 3])), 1.0)
+
+    def test_normalize_rejects_zero_vector(self):
+        with self.assertRaises(ValueError):
+            sci.normalize([0, 0, 0])
+
+    def test_angle_between_deg(self):
+        self.assertAlmostEqual(sci.angle_between_deg([1, 0], [0, 1]), 90.0)
+        self.assertAlmostEqual(sci.angle_between_deg([1, 0], [1, 1]), 45.0)
+        self.assertAlmostEqual(sci.angle_between_deg([1, 0], [-1, 0]), 180.0)
+
+    def test_angle_between_deg_is_zero_for_parallel_vectors(self):
+        # Exercises the cosine clamp: rounding can nudge this past 1.0.
+        self.assertAlmostEqual(sci.angle_between_deg([1, 1, 1], [2, 2, 2]), 0.0)
+        self.assertAlmostEqual(sci.angle_between_deg([0.1, 0.7], [0.3, 2.1]), 0.0)
+
+    def test_angle_between_deg_rejects_zero_vector(self):
+        with self.assertRaises(ValueError):
+            sci.angle_between_deg([0, 0], [1, 1])
+
 
 class TestNumericalMethods(unittest.TestCase):
     def test_derivative(self):
@@ -360,6 +431,22 @@ class TestConversions(unittest.TestCase):
         with self.assertRaises(ValueError):
             sci.kelvin_to_celsius(-1)
 
+    def test_fahrenheit_kelvin_conversions(self):
+        self.assertAlmostEqual(sci.fahrenheit_to_kelvin(32), 273.15)
+        self.assertAlmostEqual(sci.kelvin_to_fahrenheit(273.15), 32.0)
+        self.assertAlmostEqual(sci.fahrenheit_to_kelvin(-459.67), 0.0)
+
+    def test_fahrenheit_kelvin_round_trip(self):
+        for fahrenheit in (-40, 32, 98.6, 212):
+            self.assertAlmostEqual(
+                sci.kelvin_to_fahrenheit(sci.fahrenheit_to_kelvin(fahrenheit)),
+                fahrenheit,
+            )
+
+    def test_fahrenheit_to_kelvin_rejects_below_absolute_zero(self):
+        with self.assertRaises(ValueError):
+            sci.fahrenheit_to_kelvin(-500)
+
 
 class TestConstants(unittest.TestCase):
     def test_exact_si_definitions(self):
@@ -374,6 +461,70 @@ class TestConstants(unittest.TestCase):
         self.assertAlmostEqual(
             sci.GAS_CONSTANT, sci.BOLTZMANN * sci.AVOGADRO, places=6
         )
+
+class TestPhysics(unittest.TestCase):
+    def test_gravitational_force_unit_case(self):
+        self.assertAlmostEqual(
+            sci.gravitational_force(1, 1, 1), sci.GRAVITATIONAL
+        )
+
+    def test_gravitational_force_obeys_inverse_square_law(self):
+        near = sci.gravitational_force(1e6, 1e6, 1)
+        far = sci.gravitational_force(1e6, 1e6, 2)
+        self.assertAlmostEqual(near / far, 4.0)
+
+    def test_gravitational_force_reproduces_surface_gravity(self):
+        # 1 kg at the Earth's mean radius should weigh about 9.8 N.
+        self.assertAlmostEqual(
+            sci.gravitational_force(5.972e24, 1, 6.371e6), 9.82, delta=0.05
+        )
+
+    def test_gravitational_force_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            sci.gravitational_force(-1, 1, 1)
+        for distance in (0, -1):
+            with self.assertRaises(ValueError):
+                sci.gravitational_force(1, 1, distance)
+
+    def test_photon_energy(self):
+        self.assertAlmostEqual(
+            sci.photon_energy(500e-9) / 1e-19, 3.9729, places=3
+        )
+        self.assertAlmostEqual(
+            sci.photon_energy(1e-6), sci.PLANCK * sci.SPEED_OF_LIGHT / 1e-6
+        )
+
+    def test_photon_energy_is_inversely_proportional_to_wavelength(self):
+        self.assertAlmostEqual(
+            sci.photon_energy(250e-9) / sci.photon_energy(500e-9), 2.0
+        )
+
+    def test_photon_energy_rejects_non_positive_wavelength(self):
+        for wavelength in (0, -1e-9):
+            with self.assertRaises(ValueError):
+                sci.photon_energy(wavelength)
+
+    def test_ideal_gas_pressure_at_stp(self):
+        # One mole in a molar volume at 0 C is one standard atmosphere.
+        self.assertAlmostEqual(
+            sci.ideal_gas_pressure(1, 273.15, 0.022414), 101325, delta=5
+        )
+
+    def test_ideal_gas_pressure_satisfies_pv_equals_nrt(self):
+        moles, temperature, volume = 2.5, 310.0, 0.05
+        pressure = sci.ideal_gas_pressure(moles, temperature, volume)
+        self.assertAlmostEqual(
+            pressure * volume, moles * sci.GAS_CONSTANT * temperature
+        )
+
+    def test_ideal_gas_pressure_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            sci.ideal_gas_pressure(-1, 300, 1)
+        with self.assertRaises(ValueError):
+            sci.ideal_gas_pressure(1, -1, 1)
+        for volume in (0, -1):
+            with self.assertRaises(ValueError):
+                sci.ideal_gas_pressure(1, 300, volume)
 
 
 if __name__ == "__main__":

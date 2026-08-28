@@ -1,8 +1,8 @@
 """Scientific calculation utilities.
 
 A dependency-free collection of common scientific helpers: elementary
-functions, trigonometry, statistics, numerical methods, and physical
-constants.
+functions, trigonometry, statistics, vector algebra, numerical methods,
+unit conversions, and physical constants and the formulas that use them.
 
 Run directly for a short demonstration:
 
@@ -44,6 +44,11 @@ __all__ = [
     "mode",
     "percentile",
     "correlation",
+    "linear_regression",
+    "dot",
+    "magnitude",
+    "normalize",
+    "angle_between_deg",
     "derivative",
     "integrate",
     "find_root",
@@ -53,6 +58,11 @@ __all__ = [
     "fahrenheit_to_celsius",
     "celsius_to_kelvin",
     "kelvin_to_celsius",
+    "fahrenheit_to_kelvin",
+    "kelvin_to_fahrenheit",
+    "gravitational_force",
+    "photon_energy",
+    "ideal_gas_pressure",
 ]
 
 # --------------------------------------------------------------------------
@@ -267,6 +277,65 @@ def correlation(xs: Sequence[float], ys: Sequence[float]) -> float:
     return covariance / math.sqrt(spread_x * spread_y)
 
 
+def linear_regression(
+    xs: Sequence[float], ys: Sequence[float]
+) -> tuple[float, float]:
+    """Return ``(slope, intercept)`` of the least-squares fit of ``ys`` on ``xs``.
+
+    Only the fitted line is returned; pair this with :func:`correlation` when
+    you also need a goodness-of-fit measure, since ``r`` is undefined for the
+    constant-``ys`` case that this function handles fine.
+    """
+    if len(xs) != len(ys):
+        raise ValueError("inputs must have the same length")
+    if len(xs) < 2:
+        raise ValueError("linear regression requires at least two data points")
+    mx, my = mean(xs), mean(ys)
+    spread_x = math.fsum((x - mx) ** 2 for x in xs)
+    if spread_x == 0:
+        raise ValueError("slope is undefined when every x is identical")
+    slope = math.fsum((x - mx) * (y - my) for x, y in zip(xs, ys)) / spread_x
+    return slope, my - slope * mx
+
+
+# --------------------------------------------------------------------------
+# Vector algebra
+# --------------------------------------------------------------------------
+
+def dot(u: Sequence[float], v: Sequence[float]) -> float:
+    """Return the dot product of two vectors of equal length."""
+    if len(u) != len(v):
+        raise ValueError("vectors must have the same length")
+    if not u:
+        raise ValueError("vectors must not be empty")
+    return math.fsum(a * b for a, b in zip(u, v))
+
+
+def magnitude(v: Sequence[float]) -> float:
+    """Return the Euclidean length of ``v``."""
+    if not v:
+        raise ValueError("vector must not be empty")
+    return math.hypot(*v)
+
+
+def normalize(v: Sequence[float]) -> list[float]:
+    """Return a unit vector pointing in the same direction as ``v``."""
+    length = magnitude(v)
+    if length == 0:
+        raise ValueError("cannot normalize the zero vector")
+    return [x / length for x in v]
+
+
+def angle_between_deg(u: Sequence[float], v: Sequence[float]) -> float:
+    """Return the angle between ``u`` and ``v`` in degrees, within [0, 180]."""
+    scale = magnitude(u) * magnitude(v)
+    if scale == 0:
+        raise ValueError("angle is undefined for the zero vector")
+    # Clamp first: rounding can push the cosine a hair outside [-1, 1] for
+    # parallel vectors, which would make acos_deg reject a valid input.
+    return acos_deg(max(-1.0, min(1.0, dot(u, v) / scale)))
+
+
 # --------------------------------------------------------------------------
 # Numerical methods
 # --------------------------------------------------------------------------
@@ -414,6 +483,54 @@ def kelvin_to_celsius(kelvin: float) -> float:
     return kelvin - 273.15
 
 
+def fahrenheit_to_kelvin(fahrenheit: float) -> float:
+    """Convert degrees Fahrenheit to kelvin."""
+    return celsius_to_kelvin(fahrenheit_to_celsius(fahrenheit))
+
+
+def kelvin_to_fahrenheit(kelvin: float) -> float:
+    """Convert kelvin to degrees Fahrenheit."""
+    return celsius_to_fahrenheit(kelvin_to_celsius(kelvin))
+
+
+# --------------------------------------------------------------------------
+# Physics (SI units throughout, built on the constants above)
+# --------------------------------------------------------------------------
+
+def gravitational_force(m1: float, m2: float, distance: float) -> float:
+    """Return the Newtonian attraction between two masses, in newtons.
+
+    Masses are in kilograms and ``distance`` -- the separation of the two
+    centres of mass -- is in metres.
+    """
+    if m1 < 0 or m2 < 0:
+        raise ValueError("masses must be non-negative")
+    if distance <= 0:
+        raise ValueError("distance must be positive")
+    return GRAVITATIONAL * m1 * m2 / (distance * distance)
+
+
+def photon_energy(wavelength: float) -> float:
+    """Return the energy in joules of a photon of ``wavelength`` metres."""
+    if wavelength <= 0:
+        raise ValueError("wavelength must be positive")
+    return PLANCK * SPEED_OF_LIGHT / wavelength
+
+
+def ideal_gas_pressure(moles: float, temperature: float, volume: float) -> float:
+    """Return the pressure in pascals implied by ``PV = nRT``.
+
+    ``temperature`` is in kelvin and ``volume`` in cubic metres.
+    """
+    if moles < 0:
+        raise ValueError("amount of substance must be non-negative")
+    if temperature < 0:
+        raise ValueError("temperature is below absolute zero")
+    if volume <= 0:
+        raise ValueError("volume must be positive")
+    return moles * GAS_CONSTANT * temperature / volume
+
+
 # --------------------------------------------------------------------------
 # Demo
 # --------------------------------------------------------------------------
@@ -441,6 +558,14 @@ def _demo() -> None:
     print(f"  std dev         = {std_dev(samples):.4f}")
     print(f"  90th percentile = {percentile(samples, 90):.4f}")
     print(f"  corr with index = {correlation(samples, range(len(samples))):.4f}")
+    slope, intercept = linear_regression(range(len(samples)), samples)
+    print(f"  best fit line   = {slope:.4f}x + {intercept:.4f}")
+
+    print("\nVectors")
+    print(f"  [1,2,3].[4,5,6] = {dot([1, 2, 3], [4, 5, 6])}")
+    print(f"  |[3, 4]|        = {magnitude([3, 4])}")
+    print(f"  unit [3, 4]     = {normalize([3, 4])}")
+    print(f"  angle [1,0],[1,1] = {angle_between_deg([1, 0], [1, 1]):.4f} deg")
 
     print("\nNumerical methods")
     print(f"  d/dx x^2 at x=3 = {derivative(lambda x: x ** 2, 3):.6f}")
@@ -454,6 +579,12 @@ def _demo() -> None:
     print(f"  98.6 F          = {fahrenheit_to_celsius(98.6):.2f} C")
     print(f"  25 C            = {celsius_to_kelvin(25)} K")
     print(f"  300 K           = {kelvin_to_celsius(300):.2f} C")
+    print(f"  98.6 F          = {fahrenheit_to_kelvin(98.6):.2f} K")
+
+    print("\nPhysics")
+    print(f"  Earth-Moon pull = {gravitational_force(5.972e24, 7.348e22, 3.844e8):.4e} N")
+    print(f"  E of 500 nm     = {photon_energy(500e-9):.4e} J")
+    print(f"  1 mol at STP    = {ideal_gas_pressure(1, 273.15, 0.022414):.1f} Pa")
 
     print("\nConstants")
     print(f"  c               = {SPEED_OF_LIGHT} m/s")
