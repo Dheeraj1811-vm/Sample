@@ -7,6 +7,9 @@ Run from the project root with:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import math
 import sys
 import unittest
@@ -525,6 +528,113 @@ class TestPhysics(unittest.TestCase):
         for volume in (0, -1):
             with self.assertRaises(ValueError):
                 sci.ideal_gas_pressure(1, 300, volume)
+
+class TestCLI(unittest.TestCase):
+    def run_cli(self, *argv):
+        """Run the CLI in-process, returning ``(exit code, stdout, stderr)``."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = sci.main(list(argv))
+        return code, out.getvalue().strip(), err.getvalue().strip()
+
+    def assert_usage_error(self, *argv):
+        """Assert that argparse rejects ``argv`` with the conventional code 2."""
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                sci.main(list(argv))
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_scalar_commands(self):
+        self.assertEqual(self.run_cli("power", "2", "10"), (0, "1024", ""))
+        self.assertEqual(self.run_cli("sin-deg", "30"), (0, "0.5", ""))
+        self.assertEqual(self.run_cli("celsius-to-fahrenheit", "100"), (0, "212", ""))
+
+    def test_series_command_takes_space_separated_numbers(self):
+        self.assertEqual(self.run_cli("mean", "2.5", "3.1", "4.8"), (0, "3.466667", ""))
+
+    def test_vector_commands_take_comma_separated_groups(self):
+        self.assertEqual(self.run_cli("dot", "1,2,3", "4,5,6"), (0, "32", ""))
+        self.assertEqual(self.run_cli("angle-between-deg", "1,0", "1,1"), (0, "45", ""))
+
+    def test_optional_arguments(self):
+        self.assertEqual(self.run_cli("log", "1024", "--base", "2"), (0, "10", ""))
+        self.assertEqual(
+            self.run_cli("std-dev", "2", "4", "4", "4", "5", "5", "7", "9",
+                         "--population"),
+            (0, "2", ""),
+        )
+
+    def test_percentile_takes_the_percentile_first(self):
+        self.assertEqual(
+            self.run_cli("percentile", "90", "1", "2", "3", "4", "5"), (0, "4.6", "")
+        )
+
+    def test_sequence_results_print_one_per_line(self):
+        self.assertEqual(self.run_cli("normalize", "3", "4"), (0, "0.6\n0.8", ""))
+        self.assertEqual(
+            self.run_cli("solve-quadratic", "1", "2", "5"), (0, "-1+2j\n-1-2j", "")
+        )
+
+    def test_integer_results_are_printed_exactly(self):
+        code, out, _ = self.run_cli("factorial", "25")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, str(math.factorial(25)))
+
+    def test_json_output(self):
+        code, out, _ = self.run_cli("photon-energy", "500e-9", "--json")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["function"], "photon_energy")
+        self.assertAlmostEqual(payload["result"], sci.photon_energy(500e-9))
+
+    def test_json_output_for_sequences_and_complex_numbers(self):
+        _, out, _ = self.run_cli("linear-regression", "0,1,2,3", "1,3,5,7", "--json")
+        self.assertEqual(json.loads(out)["result"], [2.0, 1.0])
+
+        _, out, _ = self.run_cli("solve-quadratic", "1", "2", "5", "--json")
+        first = json.loads(out)["result"][0]
+        self.assertAlmostEqual(first["real"], -1.0)
+        self.assertAlmostEqual(first["imag"], 2.0)
+
+    def test_domain_errors_exit_with_code_one(self):
+        for argv in (("log", "0"), ("tan-deg", "90"), ("nth-root", "-16", "2")):
+            code, out, err = self.run_cli(*argv)
+            self.assertEqual(code, 1, argv)
+            self.assertEqual(out, "")
+            self.assertTrue(err.startswith("error: "), err)
+
+    def test_usage_errors_exit_with_code_two(self):
+        self.assert_usage_error("no-such-command")
+        self.assert_usage_error("mean", "not-a-number")
+        self.assert_usage_error("dot", "1,x,3", "4,5,6")
+        self.assert_usage_error("power", "2")
+
+    def test_constants_command(self):
+        code, out, _ = self.run_cli("constants")
+        self.assertEqual(code, 0)
+        # Names are padded to a fixed column, so match the value alone.
+        self.assertRegex(out, r"SPEED_OF_LIGHT\s+= 299792458\.0")
+
+        _, out, _ = self.run_cli("constants", "--json")
+        self.assertEqual(json.loads(out)["PLANCK"], sci.PLANCK)
+
+    def test_demo_runs_with_and_without_a_subcommand(self):
+        for argv in ((), ("demo",)):
+            code, out, _ = self.run_cli(*argv)
+            self.assertEqual(code, 0)
+            self.assertIn("Elementary", out)
+
+    def test_every_public_function_is_exposed_or_deliberately_library_only(self):
+        exposed = {name.replace("-", "_") for name in sci._COMMANDS}
+        public = {name for name in sci.__all__ if not name.isupper()}
+        # These take a function to operate on, so they need an expression
+        # parser before the CLI can reach them; main is the CLI itself.
+        self.assertEqual(
+            public - exposed,
+            {"derivative", "integrate", "find_root", "newton_root", "main"},
+        )
 
 
 if __name__ == "__main__":

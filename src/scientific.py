@@ -4,15 +4,22 @@ A dependency-free collection of common scientific helpers: elementary
 functions, trigonometry, statistics, vector algebra, numerical methods,
 unit conversions, and physical constants and the formulas that use them.
 
-Run directly for a short demonstration:
+The module doubles as a command-line calculator. Run a subcommand, or run
+it with no arguments for a short demonstration:
 
-    python src/scientific.py
+    python src/scientific.py mean 2.5 3.1 4.8
+    python src/scientific.py solve-quadratic 1 2 5
+    python src/scientific.py --help
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
+import sys
 from collections import Counter
+from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 __all__ = [
@@ -63,6 +70,7 @@ __all__ = [
     "gravitational_force",
     "photon_energy",
     "ideal_gas_pressure",
+    "main",
 ]
 
 # --------------------------------------------------------------------------
@@ -592,5 +600,333 @@ def _demo() -> None:
     print(f"  N_A             = {AVOGADRO} 1/mol")
 
 
+# --------------------------------------------------------------------------
+# Command-line interface
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _Argument:
+    """A positional argument of a subcommand.
+
+    ``kind`` is ``"float"``, ``"int"``, ``"floats"`` (one or more numbers,
+    written space separated) or ``"vector"`` (one comma-separated group, used
+    where a command needs two sequences and spaces would be ambiguous).
+    """
+
+    name: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class _Option:
+    """An optional ``--name`` argument of a subcommand."""
+
+    name: str
+    kind: str  # "float" or "flag"
+    default: object
+    help: str
+
+
+@dataclass(frozen=True)
+class _Command:
+    """One subcommand: what to call, and how to parse what it is called with."""
+
+    call: Callable[..., object]
+    help: str
+    arguments: tuple[_Argument, ...] = ()
+    options: tuple[_Option, ...] = field(default_factory=tuple)
+
+
+def _vector(text: str) -> list[float]:
+    """Parse a comma-separated vector such as ``"1,2,3"`` for argparse."""
+    try:
+        return [float(part) for part in text.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a comma-separated list of numbers"
+        ) from None
+
+
+_COMMANDS: dict[str, _Command] = {
+    # Elementary
+    "power": _Command(
+        power,
+        "Raise a base to an exponent.",
+        (_Argument("base", "float"), _Argument("exponent", "float")),
+    ),
+    "nth-root": _Command(
+        nth_root,
+        "Take the real n-th root of a value.",
+        (_Argument("value", "float"), _Argument("n", "int")),
+    ),
+    "log": _Command(
+        lambda value, base: log(value, base),
+        "Take a logarithm (natural unless --base is given).",
+        (_Argument("value", "float"),),
+        (_Option("base", "float", math.e, "logarithm base (default: e)"),),
+    ),
+    "factorial": _Command(
+        factorial, "Compute n!.", (_Argument("n", "int"),)
+    ),
+    "combinations": _Command(
+        combinations,
+        "Count the ways to choose k items from n.",
+        (_Argument("n", "int"), _Argument("k", "int")),
+    ),
+    "permutations": _Command(
+        permutations,
+        "Count the ordered arrangements of k items from n.",
+        (_Argument("n", "int"), _Argument("k", "int")),
+    ),
+    "hypotenuse": _Command(
+        hypotenuse,
+        "Compute sqrt(a^2 + b^2).",
+        (_Argument("a", "float"), _Argument("b", "float")),
+    ),
+    # Trigonometry
+    "sin-deg": _Command(sin_deg, "Sine of an angle in degrees.", (_Argument("angle", "float"),)),
+    "cos-deg": _Command(cos_deg, "Cosine of an angle in degrees.", (_Argument("angle", "float"),)),
+    "tan-deg": _Command(tan_deg, "Tangent of an angle in degrees.", (_Argument("angle", "float"),)),
+    "asin-deg": _Command(asin_deg, "Arcsine, in degrees.", (_Argument("value", "float"),)),
+    "acos-deg": _Command(acos_deg, "Arccosine, in degrees.", (_Argument("value", "float"),)),
+    "atan-deg": _Command(atan_deg, "Arctangent, in degrees.", (_Argument("value", "float"),)),
+    "atan2-deg": _Command(
+        atan2_deg,
+        "Angle of the point (x, y), in degrees, keeping the quadrant.",
+        (_Argument("y", "float"), _Argument("x", "float")),
+    ),
+    # Statistics
+    "mean": _Command(mean, "Arithmetic mean.", (_Argument("values", "floats"),)),
+    "median": _Command(median, "Median.", (_Argument("values", "floats"),)),
+    "mode": _Command(mode, "Most frequent value.", (_Argument("values", "floats"),)),
+    "percentile": _Command(
+        lambda percent, values: percentile(values, percent),
+        "Percentile, interpolated between ranks.",
+        (_Argument("percent", "float"), _Argument("values", "floats")),
+    ),
+    "variance": _Command(
+        lambda values, population: variance(values, sample=not population),
+        "Variance (sample by default).",
+        (_Argument("values", "floats"),),
+        (_Option("population", "flag", False, "use the population variance"),),
+    ),
+    "std-dev": _Command(
+        lambda values, population: std_dev(values, sample=not population),
+        "Standard deviation (sample by default).",
+        (_Argument("values", "floats"),),
+        (_Option("population", "flag", False, "use the population deviation"),),
+    ),
+    "correlation": _Command(
+        correlation,
+        "Pearson correlation of two comma-separated series.",
+        (_Argument("xs", "vector"), _Argument("ys", "vector")),
+    ),
+    "linear-regression": _Command(
+        linear_regression,
+        "Least-squares slope and intercept of two comma-separated series.",
+        (_Argument("xs", "vector"), _Argument("ys", "vector")),
+    ),
+    # Vectors
+    "dot": _Command(
+        dot,
+        "Dot product of two comma-separated vectors.",
+        (_Argument("u", "vector"), _Argument("v", "vector")),
+    ),
+    "magnitude": _Command(
+        magnitude, "Euclidean length of a vector.", (_Argument("v", "floats"),)
+    ),
+    "normalize": _Command(
+        normalize, "Unit vector in the same direction.", (_Argument("v", "floats"),)
+    ),
+    "angle-between-deg": _Command(
+        angle_between_deg,
+        "Angle between two comma-separated vectors, in degrees.",
+        (_Argument("u", "vector"), _Argument("v", "vector")),
+    ),
+    # Numerical methods
+    "solve-quadratic": _Command(
+        solve_quadratic,
+        "Both roots of a*x^2 + b*x + c = 0.",
+        (_Argument("a", "float"), _Argument("b", "float"), _Argument("c", "float")),
+    ),
+    # Conversions
+    "celsius-to-fahrenheit": _Command(
+        celsius_to_fahrenheit, "Celsius to Fahrenheit.", (_Argument("celsius", "float"),)
+    ),
+    "fahrenheit-to-celsius": _Command(
+        fahrenheit_to_celsius, "Fahrenheit to Celsius.", (_Argument("fahrenheit", "float"),)
+    ),
+    "celsius-to-kelvin": _Command(
+        celsius_to_kelvin, "Celsius to kelvin.", (_Argument("celsius", "float"),)
+    ),
+    "kelvin-to-celsius": _Command(
+        kelvin_to_celsius, "Kelvin to Celsius.", (_Argument("kelvin", "float"),)
+    ),
+    "fahrenheit-to-kelvin": _Command(
+        fahrenheit_to_kelvin, "Fahrenheit to kelvin.", (_Argument("fahrenheit", "float"),)
+    ),
+    "kelvin-to-fahrenheit": _Command(
+        kelvin_to_fahrenheit, "Kelvin to Fahrenheit.", (_Argument("kelvin", "float"),)
+    ),
+    # Physics
+    "gravitational-force": _Command(
+        gravitational_force,
+        "Newtonian attraction between two masses (kg, kg, m).",
+        (
+            _Argument("m1", "float"),
+            _Argument("m2", "float"),
+            _Argument("distance", "float"),
+        ),
+    ),
+    "photon-energy": _Command(
+        photon_energy,
+        "Energy of a photon of the given wavelength, in metres.",
+        (_Argument("wavelength", "float"),),
+    ),
+    "ideal-gas-pressure": _Command(
+        ideal_gas_pressure,
+        "Pressure from PV = nRT (mol, K, m^3).",
+        (
+            _Argument("moles", "float"),
+            _Argument("temperature", "float"),
+            _Argument("volume", "float"),
+        ),
+    ),
+}
+
+# The constants are the upper-case half of the public API.
+_CONSTANTS = {name: globals()[name] for name in __all__ if name.isupper()}
+
+_EPILOG = """\
+examples:
+  %(prog)s mean 2.5 3.1 4.8            one sequence: space separated
+  %(prog)s dot 1,2,3 4,5,6             two sequences: comma separated groups
+  %(prog)s std-dev 2 4 4 4 5 5 7 9 --population
+  %(prog)s log 1024 --base 2
+  %(prog)s photon-energy 500e-9 --json
+
+Commands that need a function to work on -- derivative, integrate, find_root
+and newton_root -- are library-only, since there is no expression parser yet.
+"""
+
+
+def _format_number(value: float) -> str:
+    """Render a float compactly, switching to exponent form at the extremes."""
+    if math.isnan(value) or math.isinf(value):
+        return str(value)
+    if value == 0:
+        return "0"
+    if abs(value) < 1e-4 or abs(value) >= 1e7:
+        return f"{value:.7e}"
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _format_value(value: object) -> str:
+    """Render a result for the terminal, one line per element of a sequence."""
+    if isinstance(value, bool) or isinstance(value, int):
+        return str(value)
+    if isinstance(value, complex):
+        real, imag = _format_number(value.real), _format_number(abs(value.imag))
+        return f"{real}{'+' if value.imag >= 0 else '-'}{imag}j"
+    if isinstance(value, float):
+        return _format_number(value)
+    if isinstance(value, (list, tuple)):
+        return "\n".join(_format_value(item) for item in value)
+    return str(value)
+
+
+def _jsonable(value: object) -> object:
+    """Convert a result into something :mod:`json` can encode."""
+    if isinstance(value, complex):
+        return {"real": value.real, "imag": value.imag}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser, one subparser per entry in ``_COMMANDS``."""
+    parser = argparse.ArgumentParser(
+        prog="scientific",
+        description="Scientific calculator. Run without a command for a demo.",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--json", action="store_true", help="print the result as a JSON object"
+    )
+
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+    subparsers.add_parser("demo", help="print a short demonstration of the module")
+    subparsers.add_parser(
+        "constants", parents=[shared], help="print the physical constants"
+    )
+
+    types = {"float": float, "int": int, "floats": float, "vector": _vector}
+    for name, command in _COMMANDS.items():
+        sub = subparsers.add_parser(name, parents=[shared], help=command.help)
+        for argument in command.arguments:
+            sub.add_argument(
+                argument.name,
+                type=types[argument.kind],
+                nargs="+" if argument.kind == "floats" else None,
+            )
+        for option in command.options:
+            if option.kind == "flag":
+                sub.add_argument(
+                    f"--{option.name}", action="store_true", help=option.help
+                )
+            else:
+                sub.add_argument(
+                    f"--{option.name}",
+                    type=float,
+                    default=option.default,
+                    help=option.help,
+                )
+    return parser
+
+
+def _emit(name: str, result: object, as_json: bool) -> None:
+    """Print ``result`` as plain text or as a JSON object."""
+    if as_json:
+        payload = {"function": name.replace("-", "_"), "result": _jsonable(result)}
+        print(json.dumps(payload))
+    else:
+        print(_format_value(result))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the command line interface and return a process exit code."""
+    args = _build_parser().parse_args(argv)
+
+    if args.command is None or args.command == "demo":
+        _demo()
+        return 0
+
+    if args.command == "constants":
+        if args.json:
+            print(json.dumps(_CONSTANTS))
+        else:
+            width = max(len(name) for name in _CONSTANTS)
+            for name, value in _CONSTANTS.items():
+                # repr, not _format_number: these are reference values, so
+                # exact round-tripping matters more than compactness.
+                print(f"{name:<{width}} = {value!r}")
+        return 0
+
+    command = _COMMANDS[args.command]
+    positional = [getattr(args, argument.name) for argument in command.arguments]
+    keywords = {option.name: getattr(args, option.name) for option in command.options}
+    try:
+        result = command.call(*positional, **keywords)
+    except (ValueError, OverflowError, ZeroDivisionError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    _emit(args.command, result, args.json)
+    return 0
+
+
 if __name__ == "__main__":
-    _demo()
+    raise SystemExit(main())
