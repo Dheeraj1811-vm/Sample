@@ -9,19 +9,19 @@ on:
     inputs:
       wait-minutes:
         description: "Minutes to hold the run before the checks execute"
-        default: "7"
+        default: "11"
 
 permissions:
   contents: read
 
-# A 7 minute hold per run adds up fast when commits land back to back, so
+# An 11 minute hold per run adds up fast when commits land back to back, so
 # supersede any run still waiting on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  WAIT_MINUTES: ${{ github.event.inputs.wait-minutes || 7 }}
+  WAIT_MINUTES: ${{ github.event.inputs.wait-minutes || 11 }}
 
 jobs:
   wait:
