@@ -626,15 +626,166 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Elementary", out)
 
-    def test_every_public_function_is_exposed_or_deliberately_library_only(self):
+    def test_every_public_function_is_reachable_from_the_cli(self):
+        # Subcommands, plus the two commands named differently from their
+        # function (eval -> evaluate, repl). The functions that take a
+        # function to work on are reachable through eval rather than having
+        # a subcommand of their own.
         exposed = {name.replace("-", "_") for name in sci._COMMANDS}
+        exposed |= {"evaluate", "repl"}
+        eval_only = set(sci._DEFERRED_FIRST_ARGUMENT)
         public = {name for name in sci.__all__ if not name.isupper()}
-        # These take a function to operate on, so they need an expression
-        # parser before the CLI can reach them; main is the CLI itself.
+        self.assertEqual(public - exposed - eval_only, {"main"})
+
+    def test_eval_subcommand(self):
         self.assertEqual(
-            public - exposed,
-            {"derivative", "integrate", "find_root", "newton_root", "main"},
+            self.run_cli("eval", "2 * sin_deg(30) + log(100, 10)"), (0, "3", "")
         )
+        # The words of an unquoted expression are joined back together.
+        self.assertEqual(self.run_cli("eval", "1", "+", "1"), (0, "2", ""))
+
+    def test_eval_subcommand_json_reports_the_expression(self):
+        code, out, _ = self.run_cli("eval", "mean([1, 2, 3, 4])", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads(out), {"expression": "mean([1, 2, 3, 4])", "result": 2.5}
+        )
+
+    def test_eval_subcommand_reports_errors(self):
+        code, out, err = self.run_cli("eval", "1 / 0")
+        self.assertEqual((code, out), (1, ""))
+        self.assertTrue(err.startswith("error: "), err)
+
+    def test_eval_only_functions_are_in_the_expression_namespace(self):
+        for name in sci._DEFERRED_FIRST_ARGUMENT:
+            self.assertIn(name, sci._NAMESPACE)
+
+class TestExpressions(unittest.TestCase):
+    def test_arithmetic_and_precedence(self):
+        self.assertAlmostEqual(sci.evaluate("1 + 2 * 3"), 7.0)
+        self.assertAlmostEqual(sci.evaluate("(1 + 2) * 3"), 9.0)
+        self.assertAlmostEqual(sci.evaluate("7 % 4"), 3.0)
+        self.assertAlmostEqual(sci.evaluate("10 / 4"), 2.5)
+
+    def test_power_is_right_associative_and_binds_tighter_than_unary_minus(self):
+        self.assertAlmostEqual(sci.evaluate("2^3^2"), 512.0)
+        self.assertAlmostEqual(sci.evaluate("-2^2"), -4.0)
+        self.assertAlmostEqual(sci.evaluate("2^-1"), 0.5)
+        self.assertAlmostEqual(sci.evaluate("--3"), 3.0)
+
+    def test_double_star_is_accepted_for_power(self):
+        self.assertAlmostEqual(sci.evaluate("2 ** 10"), sci.evaluate("2 ^ 10"))
+
+    def test_function_calls(self):
+        self.assertAlmostEqual(sci.evaluate("2 * sin_deg(30) + log(100, 10)"), 3.0)
+        self.assertAlmostEqual(sci.evaluate("log(power(2, 10), 2)"), 10.0)
+        self.assertAlmostEqual(sci.evaluate("sqrt(16)"), 4.0)
+
+    def test_list_literals_feed_the_sequence_functions(self):
+        self.assertAlmostEqual(sci.evaluate("mean([1, 2, 3, 4])"), 2.5)
+        self.assertAlmostEqual(sci.evaluate("dot([1, 2, 3], [4, 5, 6])"), 32.0)
+        self.assertEqual(sci.evaluate("normalize([3, 4])"), [0.6, 0.8])
+
+    def test_constants_are_in_scope(self):
+        self.assertAlmostEqual(sci.evaluate("pi"), math.pi)
+        self.assertAlmostEqual(sci.evaluate("SPEED_OF_LIGHT"), sci.SPEED_OF_LIGHT)
+
+    def test_deferred_first_argument_binds_x(self):
+        self.assertAlmostEqual(sci.evaluate("derivative(x^2, 3)"), 6.0, places=5)
+        self.assertAlmostEqual(sci.evaluate("integrate(x^2, 0, 1)"), 1 / 3, places=9)
+        self.assertAlmostEqual(
+            sci.evaluate("find_root(x^2 - 2, 0, 2)"), math.sqrt(2), places=9
+        )
+        self.assertAlmostEqual(
+            sci.evaluate("newton_root(x^2 - 2, 1)"), math.sqrt(2), places=9
+        )
+
+    def test_deferred_argument_sees_the_surrounding_variables(self):
+        variables = {"k": 3.0}
+        self.assertAlmostEqual(
+            sci.evaluate("derivative(k * x, 1)", variables), 3.0, places=6
+        )
+
+    def test_variables_persist_across_calls(self):
+        variables = {}
+        self.assertAlmostEqual(sci.evaluate("radius = 2.5", variables), 2.5)
+        self.assertAlmostEqual(sci.evaluate("pi * radius^2", variables), math.pi * 6.25)
+        self.assertEqual(variables["radius"], 2.5)
+
+    def test_assignment_cannot_shadow_the_calculator(self):
+        for expression in ("pi = 3", "mean = 1"):
+            with self.assertRaises(ValueError):
+                sci.evaluate(expression)
+
+    def test_syntax_errors(self):
+        for expression in ("2 +", "(1 + 2", "1 2", "", "[1, 2", "2 & 3"):
+            with self.assertRaises(ValueError):
+                sci.evaluate(expression)
+
+    def test_name_errors(self):
+        for expression in ("foo(2)", "bar", "pi(2)", "sin_deg"):
+            with self.assertRaises(ValueError):
+                sci.evaluate(expression)
+
+    def test_division_by_zero_is_a_value_error(self):
+        for expression in ("1 / 0", "1 % 0"):
+            with self.assertRaises(ValueError):
+                sci.evaluate(expression)
+
+    def test_bad_call_reports_the_function(self):
+        with self.assertRaisesRegex(ValueError, "bad call to mean"):
+            sci.evaluate("mean(1, 2, 3)")
+
+    def test_python_is_not_reachable(self):
+        for expression in (
+            "__import__('os')",
+            "open('/etc/passwd')",
+            "[].__class__",
+            "eval('1')",
+        ):
+            with self.assertRaises(ValueError):
+                sci.evaluate(expression)
+
+
+class TestRepl(unittest.TestCase):
+    def run_repl(self, *lines):
+        """Drive the REPL with ``lines``, returning ``(code, stdout, stderr)``."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = sci.repl(list(lines))
+        return code, out.getvalue().strip(), err.getvalue().strip()
+
+    def test_evaluates_each_line(self):
+        code, out, err = self.run_repl("1 + 1", "sin_deg(30)")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, "2\n0.5")
+
+    def test_underscore_holds_the_previous_result(self):
+        _, out, _err = self.run_repl("2 + 3", "_ * 2")
+        self.assertEqual(out, "5\n10")
+
+    def test_assignments_and_vars(self):
+        _, out, _err = self.run_repl("radius = 2", "radius^2", "vars")
+        # vars lists what the user defined, not the implicit "_".
+        self.assertEqual(out, "2\n4\nradius = 2")
+
+    def test_errors_do_not_stop_the_loop(self):
+        code, out, err = self.run_repl("1 / 0", "1 + 1")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "2")
+        self.assertTrue(err.startswith("error: "), err)
+
+    def test_quit_stops_reading(self):
+        _, out, _err = self.run_repl("1 + 1", "quit", "2 + 2")
+        self.assertEqual(out, "2")
+
+    def test_blank_lines_and_comments_are_skipped(self):
+        _, out, _err = self.run_repl("", "   ", "# a note", "3")
+        self.assertEqual(out, "3")
+
+    def test_help_is_available(self):
+        _, out, _err = self.run_repl("help")
+        self.assertIn("quit", out)
 
 
 if __name__ == "__main__":

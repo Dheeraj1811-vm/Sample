@@ -8,7 +8,8 @@ The module doubles as a command-line calculator. Run a subcommand, or run
 it with no arguments for a short demonstration:
 
     python src/scientific.py mean 2.5 3.1 4.8
-    python src/scientific.py solve-quadratic 1 2 5
+    python src/scientific.py eval "2 * sin_deg(30) + log(100, 10)"
+    python src/scientific.py repl
     python src/scientific.py --help
 """
 
@@ -17,10 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import operator
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Sequence
 
 __all__ = [
     "SPEED_OF_LIGHT",
@@ -70,6 +73,8 @@ __all__ = [
     "gravitational_force",
     "photon_energy",
     "ideal_gas_pressure",
+    "evaluate",
+    "repl",
     "main",
 ]
 
@@ -601,6 +606,361 @@ def _demo() -> None:
 
 
 # --------------------------------------------------------------------------
+# Expression evaluation
+# --------------------------------------------------------------------------
+
+_TOKEN_PATTERN = re.compile(
+    r"""
+      (?P<space>\s+)
+    | (?P<number>\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?)
+    | (?P<name>[A-Za-z_][A-Za-z_0-9]*)
+    | (?P<operator>\*\*|[-+*/%^(),\[\]=])
+    """,
+    re.VERBOSE,
+)
+
+_BINARY_OPERATORS = {
+    "+": operator.add,
+    "-": operator.sub,
+    "*": operator.mul,
+    "/": operator.truediv,
+    "%": operator.mod,
+    "^": operator.pow,
+}
+
+# These take a function as their first argument. In an expression that
+# argument is left unevaluated and bound to the variable ``x`` instead, so
+# ``derivative(x^2, 3)`` reads the way it would on paper.
+_DEFERRED_FIRST_ARGUMENT = frozenset(
+    {"derivative", "integrate", "find_root", "newton_root"}
+)
+
+
+@dataclass(frozen=True)
+class _Token:
+    kind: str
+    text: str
+    position: int
+
+
+@dataclass(frozen=True)
+class _Number:
+    value: float
+
+
+@dataclass(frozen=True)
+class _Variable:
+    name: str
+
+
+@dataclass(frozen=True)
+class _Series:
+    items: tuple
+
+
+@dataclass(frozen=True)
+class _Unary:
+    op: str
+    operand: object
+
+
+@dataclass(frozen=True)
+class _Binary:
+    op: str
+    left: object
+    right: object
+
+
+@dataclass(frozen=True)
+class _Invocation:
+    name: str
+    arguments: tuple
+
+
+def _tokenize(text: str) -> list[_Token]:
+    """Split ``text`` into tokens, rejecting anything the grammar cannot use."""
+    tokens: list[_Token] = []
+    position = 0
+    while position < len(text):
+        match = _TOKEN_PATTERN.match(text, position)
+        if match is None:
+            raise ValueError(f"unexpected character {text[position]!r} at {position}")
+        kind = match.lastgroup
+        if kind != "space":
+            # "**" is accepted as a synonym for "^" so that Python habits work.
+            token = "^" if match.group() == "**" else match.group()
+            tokens.append(_Token(kind, token, position))
+        position = match.end()
+    return tokens
+
+
+class _Parser:
+    """A recursive descent parser for the calculator grammar.
+
+    The grammar, loosest binding first::
+
+        expression := term (("+" | "-") term)*
+        term       := unary (("*" | "/" | "%") unary)*
+        unary      := ("+" | "-") unary | power
+        power      := primary ("^" unary)?
+        primary    := NUMBER | NAME | NAME "(" args ")" | "[" args "]"
+                    | "(" expression ")"
+
+    ``^`` binds tighter than unary minus and is right associative, so
+    ``-2^2`` is ``-4`` and ``2^-1`` is ``0.5``, matching normal notation.
+    """
+
+    def __init__(self, tokens: Sequence[_Token]) -> None:
+        self._tokens = tokens
+        self._index = 0
+
+    def parse(self) -> object:
+        """Parse a complete expression and insist that nothing is left over."""
+        node = self._expression()
+        if self._peek() is not None:
+            raise ValueError(f"unexpected {self._peek().text!r} at {self._peek().position}")
+        return node
+
+    def _peek(self) -> _Token | None:
+        return self._tokens[self._index] if self._index < len(self._tokens) else None
+
+    def _take(self, text: str) -> bool:
+        token = self._peek()
+        if token is not None and token.text == text:
+            self._index += 1
+            return True
+        return False
+
+    def _expect(self, text: str) -> None:
+        if not self._take(text):
+            token = self._peek()
+            where = f"at {token.position}" if token else "at end of expression"
+            raise ValueError(f"expected {text!r} {where}")
+
+    def _expression(self) -> object:
+        node = self._term()
+        while (token := self._peek()) is not None and token.text in ("+", "-"):
+            self._index += 1
+            node = _Binary(token.text, node, self._term())
+        return node
+
+    def _term(self) -> object:
+        node = self._unary()
+        while (token := self._peek()) is not None and token.text in ("*", "/", "%"):
+            self._index += 1
+            node = _Binary(token.text, node, self._unary())
+        return node
+
+    def _unary(self) -> object:
+        token = self._peek()
+        if token is not None and token.text in ("+", "-"):
+            self._index += 1
+            return _Unary(token.text, self._unary())
+        return self._power()
+
+    def _power(self) -> object:
+        base = self._primary()
+        if self._take("^"):
+            return _Binary("^", base, self._unary())
+        return base
+
+    def _primary(self) -> object:
+        token = self._peek()
+        if token is None:
+            raise ValueError("expression ended unexpectedly")
+        self._index += 1
+
+        if token.kind == "number":
+            return _Number(float(token.text))
+        if token.kind == "name":
+            if self._take("("):
+                return _Invocation(token.text, self._arguments(")"))
+            return _Variable(token.text)
+        if token.text == "[":
+            return _Series(self._arguments("]"))
+        if token.text == "(":
+            node = self._expression()
+            self._expect(")")
+            return node
+        raise ValueError(f"unexpected {token.text!r} at {token.position}")
+
+    def _arguments(self, closing: str) -> tuple:
+        """Parse a comma-separated argument or element list up to ``closing``."""
+        if self._take(closing):
+            return ()
+        arguments = [self._expression()]
+        while self._take(","):
+            arguments.append(self._expression())
+        self._expect(closing)
+        return tuple(arguments)
+
+
+def _expression_namespace() -> dict[str, object]:
+    """Return the names an expression may use: the public API plus a few aliases."""
+    namespace: dict[str, object] = {
+        name: globals()[name]
+        for name in __all__
+        if name not in ("evaluate", "repl", "main")
+    }
+    namespace.update(
+        pi=math.pi, e=math.e, tau=math.tau, sqrt=math.sqrt, exp=math.exp, abs=abs
+    )
+    return namespace
+
+
+_NAMESPACE = _expression_namespace()
+
+
+def _evaluate_node(node: object, variables: dict[str, object]) -> object:
+    """Evaluate one parsed node against ``variables`` and the shared namespace."""
+    if isinstance(node, _Number):
+        return node.value
+
+    if isinstance(node, _Variable):
+        if node.name in variables:
+            return variables[node.name]
+        if node.name in _NAMESPACE and not callable(_NAMESPACE[node.name]):
+            return _NAMESPACE[node.name]
+        if node.name in _NAMESPACE:
+            raise ValueError(f"{node.name!r} is a function; call it as {node.name}(...)")
+        raise ValueError(f"unknown name {node.name!r}")
+
+    if isinstance(node, _Series):
+        return [_evaluate_node(item, variables) for item in node.items]
+
+    if isinstance(node, _Unary):
+        value = _evaluate_node(node.operand, variables)
+        return -value if node.op == "-" else +value
+
+    if isinstance(node, _Binary):
+        left = _evaluate_node(node.left, variables)
+        right = _evaluate_node(node.right, variables)
+        if node.op in ("/", "%") and right == 0:
+            raise ValueError("division by zero")
+        return _BINARY_OPERATORS[node.op](left, right)
+
+    if isinstance(node, _Invocation):
+        function = _NAMESPACE.get(node.name)
+        if function is None:
+            raise ValueError(f"unknown function {node.name!r}")
+        if not callable(function):
+            raise ValueError(f"{node.name!r} is a constant, not a function")
+        if node.name in _DEFERRED_FIRST_ARGUMENT:
+            if not node.arguments:
+                raise ValueError(f"{node.name} needs an expression to work on")
+            body = node.arguments[0]
+            arguments = [lambda value: _evaluate_node(body, {**variables, "x": value})]
+            arguments.extend(
+                _evaluate_node(argument, variables) for argument in node.arguments[1:]
+            )
+        else:
+            arguments = [
+                _evaluate_node(argument, variables) for argument in node.arguments
+            ]
+        try:
+            return function(*arguments)
+        except TypeError as exc:
+            raise ValueError(f"bad call to {node.name}: {exc}") from None
+
+    raise ValueError(f"cannot evaluate {node!r}")
+
+
+def evaluate(expression: str, variables: dict[str, object] | None = None) -> object:
+    """Evaluate a calculator ``expression`` and return its value.
+
+    Expressions use ``+ - * / % ^`` (``**`` is accepted for ``^``), parentheses,
+    ``[1, 2, 3]`` lists for the functions that take a series, and any public
+    name in this module::
+
+        >>> evaluate("2 * sin_deg(30) + log(100, 10)")
+        3.0
+        >>> evaluate("mean([1, 2, 3, 4])")
+        2.5
+        >>> evaluate("derivative(x^2, 3)")
+        6.000000000838668
+
+    ``variables`` is read and written in place, so ``x = 3`` in one call is
+    visible to the next. Anything malformed raises ``ValueError``; nothing is
+    passed to :func:`eval`, and only the names above are reachable.
+    """
+    if variables is None:
+        variables = {}
+
+    tokens = _tokenize(expression)
+    if not tokens:
+        raise ValueError("empty expression")
+
+    # An assignment is the only statement form: NAME "=" expression.
+    if len(tokens) > 1 and tokens[0].kind == "name" and tokens[1].text == "=":
+        name = tokens[0].text
+        if name in _NAMESPACE:
+            raise ValueError(f"{name!r} is part of the calculator and cannot be reused")
+        value = _evaluate_node(_Parser(tokens[2:]).parse(), variables)
+        variables[name] = value
+        return value
+
+    return _evaluate_node(_Parser(tokens).parse(), variables)
+
+
+_REPL_HELP = """\
+Type an expression, or an assignment such as "radius = 2.5".
+"_" holds the previous result, "vars" lists what you have defined,
+and "quit" leaves. Lists are written [1, 2, 3]:
+
+  mean([2.5, 3.1, 4.8])        derivative(x^2, 3)
+  hypotenuse(3, 4)             integrate(sin_deg(x), 0, 180)
+"""
+
+
+def _prompt_lines() -> Iterable[str]:
+    """Yield lines typed at the prompt, stopping at EOF or interrupt."""
+    while True:
+        try:
+            yield input("sci> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+
+def repl(lines: Iterable[str] | None = None) -> int:
+    """Run the interactive calculator, returning a process exit code.
+
+    ``lines`` exists for testing: pass an iterable of input lines to drive the
+    loop without a terminal. When it is ``None`` the lines are read from the
+    prompt.
+    """
+    interactive = lines is None
+    if interactive:
+        print('Scientific calculator. Type "help" for help, "quit" to leave.')
+
+    variables: dict[str, object] = {}
+    for line in _prompt_lines() if interactive else lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in ("quit", "exit"):
+            break
+        if line == "help":
+            print(_REPL_HELP)
+            continue
+        if line == "vars":
+            for name, value in sorted(variables.items()):
+                if name != "_":
+                    print(f"{name} = {_format_value(value)}")
+            continue
+
+        try:
+            result = evaluate(line, variables)
+        except (ValueError, OverflowError, ZeroDivisionError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            continue
+
+        variables["_"] = result
+        print(_format_value(result))
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Command-line interface
 # --------------------------------------------------------------------------
 
@@ -804,9 +1164,15 @@ examples:
   %(prog)s std-dev 2 4 4 4 5 5 7 9 --population
   %(prog)s log 1024 --base 2
   %(prog)s photon-energy 500e-9 --json
+  %(prog)s eval "2 * sin_deg(30) + log(100, 10)"
+  %(prog)s eval -- "-2^2"              -- first when it starts with a minus
+  %(prog)s repl                        interactive prompt
 
-Commands that need a function to work on -- derivative, integrate, find_root
-and newton_root -- are library-only, since there is no expression parser yet.
+The functions that take a function to work on -- derivative, integrate,
+find_root and newton_root -- have no subcommand of their own; reach them
+through eval, which binds the free variable x:
+
+  %(prog)s eval "integrate(sin_deg(x), 0, 180)"
 """
 
 
@@ -862,6 +1228,15 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "constants", parents=[shared], help="print the physical constants"
     )
+    evaluation = subparsers.add_parser(
+        "eval", parents=[shared], help="evaluate an expression"
+    )
+    evaluation.add_argument(
+        "expression",
+        nargs="+",
+        help='for example "2 * sin_deg(30)"; put -- first if it starts with a minus',
+    )
+    subparsers.add_parser("repl", help="start the interactive calculator")
 
     types = {"float": float, "int": int, "floats": float, "vector": _vector}
     for name, command in _COMMANDS.items():
@@ -913,6 +1288,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # repr, not _format_number: these are reference values, so
                 # exact round-tripping matters more than compactness.
                 print(f"{name:<{width}} = {value!r}")
+        return 0
+
+    if args.command == "repl":
+        return repl()
+
+    if args.command == "eval":
+        expression = " ".join(args.expression)
+        try:
+            result = evaluate(expression)
+        except (ValueError, OverflowError, ZeroDivisionError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps({"expression": expression, "result": _jsonable(result)})
+            )
+        else:
+            print(_format_value(result))
         return 0
 
     command = _COMMANDS[args.command]
