@@ -2,15 +2,42 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["**"]
   pull_request:
     branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      wait-minutes:
+        description: "Minutes to hold the run before the checks execute"
+        default: "7"
 
 permissions:
   contents: read
 
+# A 7 minute hold per run adds up fast when commits land back to back, so
+# supersede any run still waiting on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WAIT_MINUTES: ${{ github.event.inputs.wait-minutes || 7 }}
+
 jobs:
+  wait:
+    name: Wait before checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Hold the run
+        run: |
+          echo "Holding this run for $WAIT_MINUTES minute(s) before the checks start."
+          date -u "+started  %H:%M:%SZ"
+          sleep "$(( WAIT_MINUTES * 60 ))"
+          date -u "+finished %H:%M:%SZ"
+
   lint:
+    needs: wait
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,6 +58,7 @@ jobs:
         run: ruff format --check src/
 
   smoke:
+    needs: wait
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
