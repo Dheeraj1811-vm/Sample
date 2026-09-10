@@ -330,3 +330,8 @@ def _demo() -> None:
 
 if __name__ == "__main__":
     _demo()
+
+
+def percent_change(old: float, new: float) -> float:
+    """Percentage change from ``old`` to ``new``."""
+    return (new - old) / old * 100
